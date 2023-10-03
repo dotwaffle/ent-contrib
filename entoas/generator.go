@@ -15,6 +15,7 @@
 package entoas
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,12 +24,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"entgo.io/ent/entc/gen"
 	"entgo.io/ent/schema/field"
-	"github.com/go-openapi/inflect"
 	"github.com/ogen-go/ogen"
-	"github.com/stoewer/go-strcase"
 )
 
 type Operation string
@@ -42,6 +42,8 @@ const (
 )
 
 func generate(g *gen.Graph, spec *ogen.Spec) error {
+	// Configure all the templates. Must not be done in an init() phase as ent will not have been configured yet.
+	tmplOnce.Do(templatesSetup)
 	// Add all schemas.
 	if err := schemas(g, spec); err != nil {
 		return err
@@ -178,7 +180,31 @@ func errorResponses(s *ogen.Spec) {
 	}
 }
 
-var rules = inflect.NewDefaultRuleset()
+var (
+	tmplOnce        sync.Once
+	tmplPlural      *gen.Template
+	tmplRoot        *gen.Template
+	tmplSubRoot     *gen.Template
+	tmplOperationID *gen.Template
+	tmplSummary     *gen.Template
+	tmplDescription *gen.Template
+)
+
+// templatesSetup is called once when generate is called, configuring all the templates with the configuration from ent.
+func templatesSetup() {
+	tmplPlural = gen.MustParse(gen.NewTemplate("entoas-plural").Parse(`{{ . | plural }}`))
+	tmplRoot = gen.MustParse(gen.NewTemplate("entoas-root").Parse(`/{{ . | plural | snake }}`))
+	tmplSubRoot = gen.MustParse(gen.NewTemplate("entoas-subroot").Parse(`{{ . | snake }}`))
+	tmplOperationID = gen.MustParse(gen.NewTemplate("entoas-OperationID").Parse(`{{ . | pascal }}`))
+	tmplSummary = gen.MustParse(gen.NewTemplate("entoas-Summary").Parse(`{{ . | plural | pascal }}`))
+	tmplDescription = gen.MustParse(gen.NewTemplate("entoas-Description").Parse(`{{ . | plural | pascal }}`))
+}
+
+func pluralize(o any) string {
+	var w bytes.Buffer
+	tmplPlural.Execute(&w, o)
+	return w.String()
+}
 
 // paths adds all operations to the spec paths.
 func paths(g *gen.Graph, spec *ogen.Spec) error {
@@ -194,7 +220,11 @@ func paths(g *gen.Graph, spec *ogen.Spec) error {
 			return err
 		}
 		// root for all operations on this node.
-		root := "/" + rules.Pluralize(strcase.KebabCase(n.Name))
+		var wRoot bytes.Buffer
+		if err := tmplRoot.Execute(&wRoot, n.Name); err != nil {
+			return err
+		}
+		root := wRoot.String()
 		// Create operation.
 		if contains(ops, OpCreate) {
 			path(spec, root).Post, err = createOp(spec, n, cfg.AllowClientUUIDs)
@@ -232,7 +262,11 @@ func paths(g *gen.Graph, spec *ogen.Spec) error {
 		}
 		// Sub-Resource operations.
 		for _, e := range n.Edges {
-			subRoot := root + "/{id}/" + strcase.KebabCase(e.Name)
+			var wName bytes.Buffer
+			if err := tmplSubRoot.Execute(&wName, e.Name); err != nil {
+				return err
+			}
+			subRoot := root + "/{id}/" + wName.String()
 			ops, err := EdgeOperations(e)
 			if err != nil {
 				return err
@@ -341,11 +375,16 @@ func readEdgeOp(spec *ogen.Spec, n *gen.Type, e *gen.Edge) (*ogen.Operation, err
 	if err != nil {
 		return nil, err
 	}
+	var wOperationID bytes.Buffer
+	if err := tmplOperationID.Execute(&wOperationID, e.Name); err != nil {
+		return nil, err
+	}
+	operationID := string(OpRead) + n.Name + wOperationID.String()
 	op := ogen.NewOperation().
 		SetSummary(fmt.Sprintf("Find the attached %s", e.Type.Name)).
 		SetDescription(fmt.Sprintf("Find the attached %s of the %s with the given ID", e.Type.Name, n.Name)).
 		AddTags(n.Name).
-		SetOperationID(string(OpRead)+n.Name+strcase.UpperCamelCase(e.Name)).
+		SetOperationID(operationID).
 		AddParameters(id).
 		AddResponse(
 			strconv.Itoa(http.StatusOK),
@@ -435,8 +474,8 @@ func listOp(spec *ogen.Spec, n *gen.Type) (*ogen.Operation, error) {
 		return nil, err
 	}
 	op := ogen.NewOperation().
-		SetSummary(fmt.Sprintf("List %s", rules.Pluralize(n.Name))).
-		SetDescription(fmt.Sprintf("List %s.", rules.Pluralize(n.Name))).
+		SetSummary(fmt.Sprintf("List %s", pluralize(n.Name))).
+		SetDescription(fmt.Sprintf("List %s.", pluralize(n.Name))).
 		AddTags(n.Name).
 		SetOperationID(string(OpList)+n.Name).
 		AddParameters( // TODO(masseelch): Add cursor based pagination to entoas and ogent.
@@ -482,11 +521,31 @@ func listEdgeOp(spec *ogen.Spec, n *gen.Type, e *gen.Edge) (*ogen.Operation, err
 	if err != nil {
 		return nil, err
 	}
+	var wSummary bytes.Buffer
+	if err := tmplSummary.Execute(&wSummary, e.Name); err != nil {
+		return nil, err
+	}
+	summary := fmt.Sprintf("List attached %s", wSummary.String())
+	var wDescription bytes.Buffer
+	if err := tmplDescription.Execute(&wDescription, e.Name); err != nil {
+		return nil, err
+	}
+	description := fmt.Sprintf("List attached %s.", wDescription.String())
+	var wDescriptionResp bytes.Buffer
+	if err := tmplOperationID.Execute(&wDescriptionResp, n.Name); err != nil {
+		return nil, err
+	}
+	descriptionResp := fmt.Sprintf("result %s list", wDescriptionResp.String())
+	var wOperationID bytes.Buffer
+	if err := tmplOperationID.Execute(&wOperationID, e.Name); err != nil {
+		return nil, err
+	}
+	operationID := string(OpList) + n.Name + wOperationID.String()
 	op := ogen.NewOperation().
-		SetSummary(fmt.Sprintf("List attached %s", rules.Pluralize(strcase.UpperCamelCase(e.Name)))).
-		SetDescription(fmt.Sprintf("List attached %s.", rules.Pluralize(strcase.UpperCamelCase(e.Name)))).
+		SetSummary(summary).
+		SetDescription(description).
 		AddTags(n.Name).
-		SetOperationID(string(OpList)+n.Name+strcase.UpperCamelCase(e.Name)).
+		SetOperationID(operationID).
 		AddParameters( // TODO(masseelch): Add cursor based pagination to entoas and ogent.
 			id,
 			ogen.NewParameter().
@@ -503,7 +562,7 @@ func listEdgeOp(spec *ogen.Spec, n *gen.Type, e *gen.Edge) (*ogen.Operation, err
 		AddResponse(
 			strconv.Itoa(http.StatusOK),
 			ogen.NewResponse().
-				SetDescription(fmt.Sprintf("result %s list", rules.Pluralize(strcase.UpperCamelCase(n.Name)))).
+				SetDescription(descriptionResp).
 				SetJSONContent(spec.RefSchema(vn).Schema.AsArray()),
 		).
 		AddNamedResponses(

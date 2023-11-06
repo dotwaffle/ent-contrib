@@ -193,7 +193,7 @@ var (
 // templatesSetup is called once when generate is called, configuring all the templates with the configuration from ent.
 func templatesSetup() {
 	tmplPlural = gen.MustParse(gen.NewTemplate("entoas-plural").Parse(`{{ . | plural }}`))
-	tmplRoot = gen.MustParse(gen.NewTemplate("entoas-root").Parse(`/{{ . | plural | snake }}`))
+	tmplRoot = gen.MustParse(gen.NewTemplate("entoas-root").Parse(`/{{ . | snake | plural }}`))
 	tmplSubRoot = gen.MustParse(gen.NewTemplate("entoas-subroot").Parse(`{{ . | snake }}`))
 	tmplOperationID = gen.MustParse(gen.NewTemplate("entoas-OperationID").Parse(`{{ . | pascal }}`))
 	tmplSummary = gen.MustParse(gen.NewTemplate("entoas-Summary").Parse(`{{ . | plural | pascal }}`))
